@@ -1,6 +1,8 @@
 import io
+import os
 import zipfile
 
+from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import FileResponse, JsonResponse
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.views import APIView
@@ -22,12 +24,53 @@ def _pdf_response(data: bytes, filename: str) -> FileResponse:
     return resp
 
 
+def _discard_upload(f) -> None:
+    """Immediately remove an uploaded file from disk (if it was spooled there)."""
+    # Small uploads live in memory (nothing on disk); large ones are spooled to a
+    # temp file by Django. Close + unlink so nothing lingers after processing.
+    try:
+        path = f.temporary_file_path() if isinstance(f, TemporaryUploadedFile) else None
+    except Exception:
+        path = None
+    try:
+        f.close()
+    except Exception:
+        pass
+    if path:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+class ServerToolView(APIView):
+    """
+    Base for every file-processing endpoint. Guarantees that uploaded files are
+    NOT retained: once the response is built (the file is already read into
+    memory), we delete any on-disk temp upload and tag the response so the client
+    can show it. Actual processing runs in memory or in auto-deleted temp dirs.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        try:
+            for key in request.FILES:
+                for f in request.FILES.getlist(key):
+                    _discard_upload(f)
+        except Exception:
+            pass
+        response["X-File-Storage"] = "not-stored"
+        return response
+
+
 def health(_request):
     return JsonResponse({"status": "ok"})
 
 
-class MergeView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class MergeView(ServerToolView):
 
     def post(self, request):
         s = MergeSerializer(data=request.data)
@@ -36,8 +79,7 @@ class MergeView(APIView):
         return _pdf_response(services.merge_pdfs(files), "merged.pdf")
 
 
-class SplitView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class SplitView(ServerToolView):
 
     def post(self, request):
         s = SplitSerializer(data=request.data)
@@ -55,8 +97,7 @@ class SplitView(APIView):
         return resp
 
 
-class CompressView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class CompressView(ServerToolView):
 
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
@@ -70,8 +111,7 @@ class CompressView(APIView):
         return resp
 
 
-class RotateView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class RotateView(ServerToolView):
 
     def post(self, request):
         s = RotateSerializer(data=request.data)
@@ -81,8 +121,7 @@ class RotateView(APIView):
         return _pdf_response(out, "rotated.pdf")
 
 
-class PdfToJpgView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class PdfToJpgView(ServerToolView):
 
     def post(self, request):
         s = PdfToImagesSerializer(data=request.data)
@@ -101,8 +140,7 @@ class PdfToJpgView(APIView):
         return resp
 
 
-class PdfToWordView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class PdfToWordView(ServerToolView):
 
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
@@ -127,8 +165,7 @@ class PdfToWordView(APIView):
         return resp
 
 
-class WordToPdfView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
+class WordToPdfView(ServerToolView):
 
     def post(self, request):
         s = WordFileSerializer(data=request.data)
