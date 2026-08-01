@@ -98,6 +98,18 @@ def unlock_pdf(data: bytes, password: str) -> bytes:
         return out.getvalue()
 
 
+def repair_pdf(data: bytes) -> bytes:
+    """
+    Best-effort repair: pikepdf re-parses and rewrites the file, rebuilding the
+    cross-reference table and cleaning up structural damage. Truly corrupt files
+    may still fail (the view returns a clean error then).
+    """
+    with pikepdf.open(io.BytesIO(data)) as pdf:
+        out = io.BytesIO()
+        pdf.save(out, fix_metadata_version=True)
+        return out.getvalue()
+
+
 def pdf_to_images(data: bytes, dpi: int = 150, fmt: str = "jpeg") -> List[bytes]:
     """
     Render each PDF page to a raster image using PyMuPDF (fitz).
@@ -166,8 +178,8 @@ def docx_to_pdf(data: bytes, filename: str = "document.docx") -> bytes:
                 break
     if not soffice:
         raise RuntimeError(
-            "Word→PDF needs LibreOffice on the server. Install the "
-            "'libreoffice-writer' package (already added to the Dockerfile) and "
+            "This conversion needs LibreOffice on the server. Install the "
+            "'libreoffice' package (already added to the Dockerfile) and "
             "redeploy, or install LibreOffice locally to test on Windows."
         )
 
@@ -188,4 +200,203 @@ def docx_to_pdf(data: bytes, filename: str = "document.docx") -> bytes:
         if not pdfs:
             raise RuntimeError("LibreOffice produced no PDF output.")
         with open(pdfs[0], "rb") as fh:
+            return fh.read()
+
+
+# LibreOffice converts any office/HTML format to PDF purely from the file
+# extension, so PowerPoint / Excel / HTML → PDF all reuse the same routine.
+office_to_pdf = docx_to_pdf
+
+
+def pdf_to_markdown(data: bytes) -> bytes:
+    """Extract a PDF's text into Markdown (one section per page)."""
+    import fitz
+
+    parts = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for i, page in enumerate(doc, start=1):
+            text = page.get_text("text").strip()
+            parts.append(f"## Page {i}\n\n{text}\n")
+    md = "\n---\n\n".join(parts).strip()
+    if not md:
+        md = ("# No selectable text found\n\n"
+              "This PDF looks scanned — run it through **OCR PDF** first, then "
+              "convert to Markdown.")
+    return md.encode("utf-8")
+
+
+def pdf_to_pptx(data: bytes, dpi: int = 150) -> bytes:
+    """Render each PDF page to an image and drop it onto its own slide."""
+    import io
+
+    import fitz
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    pages = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for page in doc:
+            pix = page.get_pixmap(dpi=dpi)
+            pages.append((pix.tobytes("png"), page.rect.width, page.rect.height))
+
+    prs = Presentation()
+    if pages:
+        # PowerPoint uses one size for the whole deck; take the first page (pt→EMU).
+        _, w_pt, h_pt = pages[0]
+        prs.slide_width = Emu(int(w_pt * 12700))
+        prs.slide_height = Emu(int(h_pt * 12700))
+    blank = prs.slide_layouts[6]
+    for png, _w, _h in pages:
+        slide = prs.slides.add_slide(blank)
+        slide.shapes.add_picture(
+            io.BytesIO(png), 0, 0, width=prs.slide_width, height=prs.slide_height
+        )
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue()
+
+
+def pdf_to_xlsx(data: bytes) -> bytes:
+    """Pull tables (or failing that, text lines) from a PDF into a spreadsheet."""
+    import io
+
+    import pdfplumber
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for pi, page in enumerate(pdf.pages, start=1):
+            ws = wb.create_sheet(title=f"Page {pi}"[:31])
+            r = 1
+            tables = page.extract_tables()
+            if tables:
+                for table in tables:
+                    for row in table:
+                        for ci, val in enumerate(row, start=1):
+                            ws.cell(row=r, column=ci, value=(val or ""))
+                        r += 1
+                    r += 1  # blank row between tables
+            else:
+                for line in (page.extract_text() or "").splitlines():
+                    ws.cell(row=r, column=1, value=line)
+                    r += 1
+    if not wb.sheetnames:
+        wb.create_sheet(title="Empty")
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def ocr_pdf(data: bytes, lang: str = "eng") -> bytes:
+    """
+    Add a searchable text layer to a scanned PDF via OCRmyPDF (Tesseract).
+    Needs the tesseract-ocr + ghostscript binaries — raises RuntimeError (→ 503)
+    when they're missing so the tool degrades gracefully.
+    """
+    import os
+    import tempfile
+
+    try:
+        import ocrmypdf
+    except Exception as e:  # package not installed
+        raise RuntimeError(
+            "OCR needs 'ocrmypdf' + Tesseract on the server (added to the "
+            "Dockerfile). Redeploy the backend to enable it."
+        ) from e
+
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.pdf")
+        outp = os.path.join(tmp, "out.pdf")
+        with open(inp, "wb") as fh:
+            fh.write(data)
+        try:
+            ocrmypdf.ocr(
+                inp, outp, language=lang, skip_text=True, progress_bar=False,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                "OCR could not run — Tesseract/Ghostscript may be missing on the "
+                "server. Redeploy with the updated Dockerfile."
+            ) from e
+        with open(outp, "rb") as fh:
+            return fh.read()
+
+
+def compare_pdfs(a: bytes, b: bytes, dpi: int = 120) -> bytes:
+    """
+    Visually diff two PDFs page by page: render both to images, and output a PDF
+    where anything that changed is tinted red over the second document.
+    """
+    import io
+
+    import fitz
+    from PIL import Image, ImageChops
+
+    def render(doc, i):
+        if i >= len(doc):
+            return None
+        pix = doc[i].get_pixmap(dpi=dpi)
+        return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    da = fitz.open(stream=a, filetype="pdf")
+    db = fitz.open(stream=b, filetype="pdf")
+    try:
+        out = fitz.open()
+        n = max(len(da), len(db))
+        for i in range(n):
+            ia = render(da, i)
+            ib = render(db, i)
+            w = max(ia.width if ia else 1, ib.width if ib else 1)
+            h = max(ia.height if ia else 1, ib.height if ib else 1)
+            base_a = Image.new("RGB", (w, h), "white")
+            base_b = Image.new("RGB", (w, h), "white")
+            if ia:
+                base_a.paste(ia, (0, 0))
+            if ib:
+                base_b.paste(ib, (0, 0))
+            diff = ImageChops.difference(base_a, base_b)
+            mask = diff.convert("L").point(lambda p: 255 if p > 30 else 0)
+            red = Image.new("RGB", (w, h), (255, 40, 40))
+            result = base_b.copy()
+            result.paste(red, (0, 0), mask)
+            buf = io.BytesIO()
+            result.save(buf, format="PNG")
+            page = out.new_page(width=w, height=h)
+            page.insert_image(fitz.Rect(0, 0, w, h), stream=buf.getvalue())
+        return out.tobytes()
+    finally:
+        da.close()
+        db.close()
+
+
+def pdf_to_pdfa(data: bytes) -> bytes:
+    """
+    Convert to PDF/A-2b for long-term archiving via Ghostscript. Raises
+    RuntimeError (→ 503) if Ghostscript isn't installed.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    gs = shutil.which("gs") or shutil.which("gswin64c") or shutil.which("gswin32c")
+    if not gs:
+        raise RuntimeError(
+            "PDF/A needs Ghostscript on the server (added to the Dockerfile). "
+            "Redeploy the backend to enable it."
+        )
+    with tempfile.TemporaryDirectory() as tmp:
+        inp = os.path.join(tmp, "in.pdf")
+        outp = os.path.join(tmp, "out.pdf")
+        with open(inp, "wb") as fh:
+            fh.write(data)
+        subprocess.run(
+            [gs, "-dPDFA=2", "-dBATCH", "-dNOPAUSE", "-dQUIET",
+             "-sColorConversionStrategy=RGB", "-sDEVICE=pdfwrite",
+             "-dPDFACompatibilityPolicy=1", "-sOutputFile=" + outp, inp],
+            check=True, timeout=180,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        with open(outp, "rb") as fh:
             return fh.read()

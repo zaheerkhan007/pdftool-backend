@@ -10,7 +10,9 @@ from rest_framework.views import APIView
 
 from . import services
 from .serializers import (
+    ComparePdfSerializer,
     MergeSerializer,
+    OfficeFileSerializer,
     PasswordSerializer,
     PdfToImagesSerializer,
     RotateSerializer,
@@ -203,3 +205,134 @@ class UnlockView(ServerToolView):
         except Exception:
             return JsonResponse({"detail": "Could not unlock this PDF."}, status=422)
         return _pdf_response(out, "unlocked.pdf")
+
+
+class RepairView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.repair_pdf(data)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not repair this PDF — it may be too damaged."},
+                status=422,
+            )
+        return _pdf_response(out, "repaired.pdf")
+
+
+class OfficeToPdfView(ServerToolView):
+    """PowerPoint / Excel / HTML → PDF (all via LibreOffice, one endpoint each)."""
+
+    def post(self, request):
+        s = OfficeFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        upload = s.validated_data["file"]
+        data = upload.read()
+        try:
+            out = services.office_to_pdf(data, upload.name)
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this file to PDF."}, status=422
+            )
+        return _pdf_response(out, "converted.pdf")
+
+
+def _download(data: bytes, filename: str, content_type: str) -> FileResponse:
+    resp = FileResponse(io.BytesIO(data), content_type=content_type)
+    resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return resp
+
+
+_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+class PdfToMarkdownView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.pdf_to_markdown(data)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not extract text from this PDF."}, status=422
+            )
+        return _download(out, "converted.md", "text/markdown; charset=utf-8")
+
+
+class PdfToPptxView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.pdf_to_pptx(data)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this PDF to PowerPoint."}, status=422
+            )
+        return _download(out, "converted.pptx", _PPTX)
+
+
+class PdfToXlsxView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.pdf_to_xlsx(data)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this PDF to Excel."}, status=422
+            )
+        return _download(out, "converted.xlsx", _XLSX)
+
+
+class OcrView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.ocr_pdf(data)
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except Exception:
+            return JsonResponse({"detail": "Could not OCR this PDF."}, status=422)
+        return _pdf_response(out, "ocr.pdf")
+
+
+class PdfToPdfaView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.pdf_to_pdfa(data)
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this PDF to PDF/A."}, status=422
+            )
+        return _pdf_response(out, "converted-pdfa.pdf")
+
+
+class ComparePdfView(ServerToolView):
+    def post(self, request):
+        s = ComparePdfSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        a = s.validated_data["file"].read()
+        b = s.validated_data["other"].read()
+        try:
+            out = services.compare_pdfs(a, b)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not compare these PDFs."}, status=422
+            )
+        return _pdf_response(out, "comparison.pdf")
