@@ -18,6 +18,7 @@ from .serializers import (
     RotateSerializer,
     SingleFileSerializer,
     SplitSerializer,
+    TranslateSerializer,
     WordFileSerializer,
 )
 
@@ -336,3 +337,35 @@ class ComparePdfView(ServerToolView):
                 {"detail": "Could not compare these PDFs."}, status=422
             )
         return _pdf_response(out, "comparison.pdf")
+
+
+class SummarizeView(ServerToolView):
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.summarize_pdf(data)
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except ValueError as e:
+            return JsonResponse({"detail": str(e)}, status=422)
+        except Exception:
+            return JsonResponse({"detail": "Could not summarize this PDF."}, status=422)
+        return _download(out, "summary.md", "text/markdown; charset=utf-8")
+
+
+class TranslateView(ServerToolView):
+    def post(self, request):
+        s = TranslateSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.translate_pdf(data, s.validated_data["target_language"])
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except ValueError as e:
+            return JsonResponse({"detail": str(e)}, status=422)
+        except Exception:
+            return JsonResponse({"detail": "Could not translate this PDF."}, status=422)
+        return _download(out, "translated.txt", "text/plain; charset=utf-8")
