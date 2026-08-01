@@ -13,8 +13,12 @@ pikepdf==9.0.0
 Pillow==10.3.0
 pdf2image==1.17.0
 reportlab==4.2.0
-PyMuPDF>=1.28.0          # PDF → JPG rendering (abi3 wheel works on Py 3.12–3.14, no system deps)
+PyMuPDF>=1.28.0          # PDF → JPG/PPTX/Markdown rendering (abi3 wheel, no system deps)
 pdf2docx>=0.5.13         # PDF → Word (pure pip: PyMuPDF + python-docx + opencv-headless)
+python-pptx>=0.6.23      # PDF → PowerPoint (one page-image per slide)
+openpyxl>=3.1.2          # PDF → Excel (write extracted tables)
+pdfplumber>=0.11.0       # PDF → Excel (table/text extraction)
+ocrmypdf>=16.0.0         # OCR PDF (needs tesseract-ocr + ghostscript system pkgs)
 
 # Async jobs (optional but wired up)
 celery==5.4.0

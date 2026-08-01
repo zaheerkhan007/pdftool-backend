@@ -87,3 +87,34 @@ class PdfToImagesSerializer(SingleFileSerializer):
 
 class PasswordSerializer(SingleFileSerializer):
     password = serializers.CharField(min_length=1, max_length=256, trim_whitespace=False)
+
+
+OFFICE_EXTS = (
+    ".ppt", ".pptx", ".xls", ".xlsx", ".html", ".htm",
+    ".doc", ".docx", ".odt", ".ods", ".odp", ".csv", ".rtf", ".txt",
+)
+
+
+class OfficeFileSerializer(serializers.Serializer):
+    """Any office / HTML document LibreOffice can turn into a PDF."""
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        if value.size > MAX_BYTES:
+            raise serializers.ValidationError(
+                f"File too large. Max {settings.MAX_UPLOAD_MB}MB."
+            )
+        if not value.name.lower().endswith(OFFICE_EXTS):
+            raise serializers.ValidationError("Unsupported file type.")
+        return value
+
+
+class ComparePdfSerializer(serializers.Serializer):
+    file = serializers.FileField()
+    other = serializers.FileField()
+
+    def validate_file(self, value):
+        return _validate_pdf(value)
+
+    def validate_other(self, value):
+        return _validate_pdf(value)

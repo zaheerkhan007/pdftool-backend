@@ -5,13 +5,17 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 # System deps:
-#  - libqpdf-dev, gcc      : pikepdf build
-#  - libreoffice-writer    : Word → PDF conversion (the only tool needing a binary)
-#  - libglib2.0-0          : runtime lib for opencv-headless (pulled in by pdf2docx)
-#  - fonts-dejavu-core     : sane default fonts so converted PDFs aren't blank/boxes
+#  - libqpdf-dev, gcc                       : pikepdf build
+#  - libreoffice-writer/calc/impress        : Word/Excel/PowerPoint/HTML → PDF
+#  - tesseract-ocr                          : OCR PDF (searchable scans)
+#  - ghostscript                            : OCR + PDF/A conversion
+#  - libglib2.0-0                           : runtime lib for opencv-headless (pdf2docx)
+#  - fonts-dejavu-core                      : sane default fonts in converted PDFs
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libqpdf-dev gcc \
-    libreoffice-writer \
+    libreoffice-writer libreoffice-calc libreoffice-impress \
+    tesseract-ocr \
+    ghostscript \
     libglib2.0-0 \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
