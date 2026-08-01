@@ -17,6 +17,9 @@ env = environ.Env(
     USE_POSTGRES=(bool, False),
     CELERY_BROKER_URL=(str, "redis://localhost:6379/0"),
     MAX_UPLOAD_MB=(int, 50),
+    # Production-only knobs. Defaults keep local dev unchanged.
+    CSRF_TRUSTED_ORIGINS=(list, []),
+    BEHIND_TLS_PROXY=(bool, False),
 )
 # Load .env file if present
 environ.Env.read_env(BASE_DIR / ".env")
@@ -43,6 +46,9 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    # Serves collected static files straight from gunicorn, so the container is
+    # self-contained and needs no static volume shared with the edge proxy.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -110,6 +116,13 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Upload size guard (bytes)
@@ -144,6 +157,20 @@ SIMPLE_JWT = {
 # --- CORS -----------------------------------------------------------------
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_CREDENTIALS = True
+
+# --- Behind a TLS-terminating proxy ---------------------------------------
+# In production Caddy terminates TLS and speaks plain HTTP to gunicorn, so
+# Django only learns the original scheme from X-Forwarded-Proto. Without this
+# the admin login rejects the CSRF token and redirect URLs come out as http://.
+# Only trust the header when we know a proxy is in front of us — otherwise a
+# client could spoof it.
+if env("BEHIND_TLS_PROXY"):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+CSRF_TRUSTED_ORIGINS = env("CSRF_TRUSTED_ORIGINS")
 
 # --- Celery ---------------------------------------------------------------
 CELERY_BROKER_URL = env("CELERY_BROKER_URL")
