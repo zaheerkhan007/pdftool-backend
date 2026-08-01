@@ -12,6 +12,8 @@ pikepdf==9.0.0
 Pillow==10.3.0
 pdf2image==1.17.0
 reportlab==4.2.0
+PyMuPDF>=1.28.0          # PDF → JPG rendering (abi3 wheel works on Py 3.12–3.14, no system deps)
+pdf2docx>=0.5.13         # PDF → Word (pure pip: PyMuPDF + python-docx + opencv-headless)
 
 # Async jobs (optional but wired up)
 celery==5.4.0

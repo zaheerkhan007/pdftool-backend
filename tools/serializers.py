@@ -14,6 +14,16 @@ def _validate_pdf(f):
     return f
 
 
+def _validate_docx(f):
+    if f.size > MAX_BYTES:
+        raise serializers.ValidationError(
+            f"File too large. Max {settings.MAX_UPLOAD_MB}MB."
+        )
+    if not f.name.lower().endswith((".docx", ".doc")):
+        raise serializers.ValidationError("Only .docx / .doc files are accepted.")
+    return f
+
+
 class MergeSerializer(serializers.Serializer):
     files = serializers.ListField(
         child=serializers.FileField(), min_length=2, allow_empty=False
@@ -58,3 +68,18 @@ class RotateSerializer(SingleFileSerializer):
         if value % 90 != 0:
             raise serializers.ValidationError("Degrees must be a multiple of 90.")
         return value
+
+
+class WordFileSerializer(serializers.Serializer):
+    file = serializers.FileField()
+
+    def validate_file(self, value):
+        return _validate_docx(value)
+
+
+class PdfToImagesSerializer(SingleFileSerializer):
+    dpi = serializers.IntegerField(default=150)
+
+    def validate_dpi(self, value):
+        # Keep it sane so a huge PDF can't blow up memory.
+        return max(72, min(300, value))

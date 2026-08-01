@@ -8,9 +8,11 @@ from rest_framework.views import APIView
 from . import services
 from .serializers import (
     MergeSerializer,
+    PdfToImagesSerializer,
     RotateSerializer,
     SingleFileSerializer,
     SplitSerializer,
+    WordFileSerializer,
 )
 
 
@@ -77,3 +79,69 @@ class RotateView(APIView):
         data = s.validated_data["file"].read()
         out = services.rotate_pdf(data, s.validated_data["degrees"])
         return _pdf_response(out, "rotated.pdf")
+
+
+class PdfToJpgView(APIView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        s = PdfToImagesSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        images = services.pdf_to_images(data, dpi=s.validated_data["dpi"], fmt="jpeg")
+        # Zip the pages so the browser gets a single download.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, img in enumerate(images, start=1):
+                zf.writestr(f"page_{i}.jpg", img)
+        buf.seek(0)
+        resp = FileResponse(buf, content_type="application/zip")
+        resp["Content-Disposition"] = 'attachment; filename="images.zip"'
+        resp["X-Page-Count"] = str(len(images))
+        return resp
+
+
+class PdfToWordView(APIView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        s = SingleFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.pdf_to_docx(data)
+        except RuntimeError as e:
+            return JsonResponse({"detail": str(e)}, status=503)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this PDF to Word."}, status=422
+            )
+        resp = FileResponse(
+            io.BytesIO(out),
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".wordprocessingml.document"
+            ),
+        )
+        resp["Content-Disposition"] = 'attachment; filename="converted.docx"'
+        return resp
+
+
+class WordToPdfView(APIView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        s = WordFileSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        upload = s.validated_data["file"]
+        data = upload.read()
+        try:
+            out = services.docx_to_pdf(data, upload.name)
+        except RuntimeError as e:
+            # LibreOffice missing → clear, non-fatal 503 (other tools unaffected).
+            return JsonResponse({"detail": str(e)}, status=503)
+        except Exception:
+            return JsonResponse(
+                {"detail": "Could not convert this document to PDF."}, status=422
+            )
+        return _pdf_response(out, "converted.pdf")

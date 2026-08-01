@@ -74,3 +74,96 @@ def rotate_pdf(data: bytes, degrees: int = 90) -> bytes:
 
 def pdf_page_count(data: bytes) -> int:
     return len(PdfReader(io.BytesIO(data)).pages)
+
+
+def pdf_to_images(data: bytes, dpi: int = 150, fmt: str = "jpeg") -> List[bytes]:
+    """
+    Render each PDF page to a raster image using PyMuPDF (fitz).
+    We use PyMuPDF instead of pdf2image/poppler on purpose: it ships as a
+    self-contained wheel, so there are NO system packages to install (works
+    the same on Windows dev and in the slim Docker image).
+    Returns one image (bytes) per page.
+    """
+    import fitz  # PyMuPDF — imported lazily so the other tools work without it
+
+    images: List[bytes] = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for page in doc:
+            pix = page.get_pixmap(dpi=dpi)
+            images.append(pix.tobytes(fmt))
+    return images
+
+
+def pdf_to_docx(data: bytes) -> bytes:
+    """
+    Convert a PDF into an editable Word (.docx) using pdf2docx (pure pip, no
+    system binaries). It reconstructs text, tables and basic layout.
+    """
+    import os
+    import tempfile
+
+    from pdf2docx import Converter  # lazy import — keeps other tools dep-free
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = os.path.join(tmp, "in.pdf")
+        docx_path = os.path.join(tmp, "out.docx")
+        with open(pdf_path, "wb") as fh:
+            fh.write(data)
+        cv = Converter(pdf_path)
+        try:
+            cv.convert(docx_path)  # all pages
+        finally:
+            cv.close()
+        with open(docx_path, "rb") as fh:
+            return fh.read()
+
+
+def docx_to_pdf(data: bytes, filename: str = "document.docx") -> bytes:
+    """
+    Convert a Word document to PDF via LibreOffice headless (`soffice`).
+    This is the one tool that needs a system binary. If LibreOffice isn't
+    installed we raise a clear error (the view turns it into a 503) instead of
+    crashing — so this tool degrades gracefully and never affects the others.
+    """
+    import glob
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    # Find LibreOffice. On PATH (Docker/Linux) or common Windows install dirs,
+    # since the Windows installer doesn't add `soffice` to PATH.
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        for candidate in (
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ):
+            if os.path.exists(candidate):
+                soffice = candidate
+                break
+    if not soffice:
+        raise RuntimeError(
+            "Word→PDF needs LibreOffice on the server. Install the "
+            "'libreoffice-writer' package (already added to the Dockerfile) and "
+            "redeploy, or install LibreOffice locally to test on Windows."
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ext = os.path.splitext(filename)[1].lower() or ".docx"
+        in_path = os.path.join(tmp, "input" + ext)
+        with open(in_path, "wb") as fh:
+            fh.write(data)
+        # A private user-profile dir avoids clashes when requests run in parallel.
+        profile = "-env:UserInstallation=file://" + os.path.join(tmp, "lo_profile")
+        subprocess.run(
+            [soffice, profile, "--headless", "--convert-to", "pdf",
+             "--outdir", tmp, in_path],
+            check=True, timeout=120,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        pdfs = glob.glob(os.path.join(tmp, "*.pdf"))
+        if not pdfs:
+            raise RuntimeError("LibreOffice produced no PDF output.")
+        with open(pdfs[0], "rb") as fh:
+            return fh.read()

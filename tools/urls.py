@@ -13,4 +13,10 @@ urlpatterns = [
     path("compress", views.CompressView.as_view()),
     path("rotate/", views.RotateView.as_view(), name="rotate"),
     path("rotate", views.RotateView.as_view()),
+    path("pdf-to-jpg/", views.PdfToJpgView.as_view(), name="pdf-to-jpg"),
+    path("pdf-to-jpg", views.PdfToJpgView.as_view()),
+    path("pdf-to-word/", views.PdfToWordView.as_view(), name="pdf-to-word"),
+    path("pdf-to-word", views.PdfToWordView.as_view()),
+    path("word-to-pdf/", views.WordToPdfView.as_view(), name="word-to-pdf"),
+    path("word-to-pdf", views.WordToPdfView.as_view()),
 ]
