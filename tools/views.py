@@ -1,6 +1,9 @@
 import io
+import os
 import zipfile
 
+import pikepdf
+from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import FileResponse, JsonResponse
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.views import APIView
@@ -8,6 +11,7 @@ from rest_framework.views import APIView
 from . import services
 from .serializers import (
     MergeSerializer,
+    PasswordSerializer,
     PdfToImagesSerializer,
     RotateSerializer,
     SingleFileSerializer,
@@ -22,13 +26,51 @@ def _pdf_response(data: bytes, filename: str) -> FileResponse:
     return resp
 
 
+def _discard_upload(f) -> None:
+    """Immediately remove an uploaded file from disk (if it was spooled there)."""
+    try:
+        path = f.temporary_file_path() if isinstance(f, TemporaryUploadedFile) else None
+    except Exception:
+        path = None
+    try:
+        f.close()
+    except Exception:
+        pass
+    if path:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+
+class ServerToolView(APIView):
+    """
+    Base for every file-processing endpoint. Guarantees uploaded files are NOT
+    retained: once the response is built (the file is already in memory), we
+    delete any on-disk temp upload and tag the response. Processing itself runs
+    in memory or in auto-deleted temp dirs.
+    """
+
+    parser_classes = [MultiPartParser, FormParser]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        try:
+            for key in request.FILES:
+                for f in request.FILES.getlist(key):
+                    _discard_upload(f)
+        except Exception:
+            pass
+        response["X-File-Storage"] = "not-stored"
+        return response
+
+
 def health(_request):
     return JsonResponse({"status": "ok"})
 
 
-class MergeView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class MergeView(ServerToolView):
     def post(self, request):
         s = MergeSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -36,15 +78,12 @@ class MergeView(APIView):
         return _pdf_response(services.merge_pdfs(files), "merged.pdf")
 
 
-class SplitView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class SplitView(ServerToolView):
     def post(self, request):
         s = SplitSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data["file"].read()
         parts = services.split_pdf(data, s.validated_data["ranges"])
-        # Return a zip of the parts
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, part in enumerate(parts, start=1):
@@ -55,9 +94,7 @@ class SplitView(APIView):
         return resp
 
 
-class CompressView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class CompressView(ServerToolView):
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -70,9 +107,7 @@ class CompressView(APIView):
         return resp
 
 
-class RotateView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class RotateView(ServerToolView):
     def post(self, request):
         s = RotateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -81,15 +116,12 @@ class RotateView(APIView):
         return _pdf_response(out, "rotated.pdf")
 
 
-class PdfToJpgView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class PdfToJpgView(ServerToolView):
     def post(self, request):
         s = PdfToImagesSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data["file"].read()
         images = services.pdf_to_images(data, dpi=s.validated_data["dpi"], fmt="jpeg")
-        # Zip the pages so the browser gets a single download.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, img in enumerate(images, start=1):
@@ -101,9 +133,7 @@ class PdfToJpgView(APIView):
         return resp
 
 
-class PdfToWordView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class PdfToWordView(ServerToolView):
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -127,9 +157,7 @@ class PdfToWordView(APIView):
         return resp
 
 
-class WordToPdfView(APIView):
-    parser_classes = [MultiPartParser, FormParser]
-
+class WordToPdfView(ServerToolView):
     def post(self, request):
         s = WordFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -145,3 +173,31 @@ class WordToPdfView(APIView):
                 {"detail": "Could not convert this document to PDF."}, status=422
             )
         return _pdf_response(out, "converted.pdf")
+
+
+class ProtectView(ServerToolView):
+    def post(self, request):
+        s = PasswordSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.protect_pdf(data, s.validated_data["password"])
+        except Exception:
+            return JsonResponse({"detail": "Could not protect this PDF."}, status=422)
+        return _pdf_response(out, "protected.pdf")
+
+
+class UnlockView(ServerToolView):
+    def post(self, request):
+        s = PasswordSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.unlock_pdf(data, s.validated_data["password"])
+        except pikepdf.PasswordError:
+            return JsonResponse(
+                {"detail": "Wrong password — could not unlock this PDF."}, status=400
+            )
+        except Exception:
+            return JsonResponse({"detail": "Could not unlock this PDF."}, status=422)
+        return _pdf_response(out, "unlocked.pdf")

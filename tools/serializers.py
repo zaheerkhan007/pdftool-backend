@@ -83,3 +83,7 @@ class PdfToImagesSerializer(SingleFileSerializer):
     def validate_dpi(self, value):
         # Keep it sane so a huge PDF can't blow up memory.
         return max(72, min(300, value))
+
+
+class PasswordSerializer(SingleFileSerializer):
+    password = serializers.CharField(min_length=1, max_length=256, trim_whitespace=False)

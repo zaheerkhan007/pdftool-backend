@@ -157,6 +157,14 @@ SIMPLE_JWT = {
 # --- CORS -----------------------------------------------------------------
 CORS_ALLOWED_ORIGINS = env("CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_CREDENTIALS = True
+# Let the browser read our custom response headers (sizes, page count, and the
+# "your file was not stored" signal) even on direct cross-origin calls.
+CORS_EXPOSE_HEADERS = [
+    "X-File-Storage",
+    "X-Original-Size",
+    "X-Compressed-Size",
+    "X-Page-Count",
+]
 
 # --- Behind a TLS-terminating proxy ---------------------------------------
 # In production Caddy terminates TLS and speaks plain HTTP to gunicorn, so
