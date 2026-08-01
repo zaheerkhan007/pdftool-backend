@@ -2,6 +2,7 @@ import io
 import os
 import zipfile
 
+import pikepdf
 from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import FileResponse, JsonResponse
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -10,6 +11,7 @@ from rest_framework.views import APIView
 from . import services
 from .serializers import (
     MergeSerializer,
+    PasswordSerializer,
     PdfToImagesSerializer,
     RotateSerializer,
     SingleFileSerializer,
@@ -46,10 +48,10 @@ def _discard_upload(f) -> None:
 
 class ServerToolView(APIView):
     """
-    Base for every file-processing endpoint. Guarantees that uploaded files are
-    NOT retained: once the response is built (the file is already read into
-    memory), we delete any on-disk temp upload and tag the response so the client
-    can show it. Actual processing runs in memory or in auto-deleted temp dirs.
+    Base for every file-processing endpoint. Guarantees uploaded files are NOT
+    retained: once the response is built (the file is already in memory), we
+    delete any on-disk temp upload and tag the response. Processing itself runs
+    in memory or in auto-deleted temp dirs.
     """
 
     parser_classes = [MultiPartParser, FormParser]
@@ -71,7 +73,6 @@ def health(_request):
 
 
 class MergeView(ServerToolView):
-
     def post(self, request):
         s = MergeSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -80,13 +81,11 @@ class MergeView(ServerToolView):
 
 
 class SplitView(ServerToolView):
-
     def post(self, request):
         s = SplitSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data["file"].read()
         parts = services.split_pdf(data, s.validated_data["ranges"])
-        # Return a zip of the parts
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, part in enumerate(parts, start=1):
@@ -98,7 +97,6 @@ class SplitView(ServerToolView):
 
 
 class CompressView(ServerToolView):
-
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -112,7 +110,6 @@ class CompressView(ServerToolView):
 
 
 class RotateView(ServerToolView):
-
     def post(self, request):
         s = RotateSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -122,13 +119,11 @@ class RotateView(ServerToolView):
 
 
 class PdfToJpgView(ServerToolView):
-
     def post(self, request):
         s = PdfToImagesSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         data = s.validated_data["file"].read()
         images = services.pdf_to_images(data, dpi=s.validated_data["dpi"], fmt="jpeg")
-        # Zip the pages so the browser gets a single download.
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, img in enumerate(images, start=1):
@@ -141,7 +136,6 @@ class PdfToJpgView(ServerToolView):
 
 
 class PdfToWordView(ServerToolView):
-
     def post(self, request):
         s = SingleFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -166,7 +160,6 @@ class PdfToWordView(ServerToolView):
 
 
 class WordToPdfView(ServerToolView):
-
     def post(self, request):
         s = WordFileSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -182,3 +175,31 @@ class WordToPdfView(ServerToolView):
                 {"detail": "Could not convert this document to PDF."}, status=422
             )
         return _pdf_response(out, "converted.pdf")
+
+
+class ProtectView(ServerToolView):
+    def post(self, request):
+        s = PasswordSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.protect_pdf(data, s.validated_data["password"])
+        except Exception:
+            return JsonResponse({"detail": "Could not protect this PDF."}, status=422)
+        return _pdf_response(out, "protected.pdf")
+
+
+class UnlockView(ServerToolView):
+    def post(self, request):
+        s = PasswordSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        data = s.validated_data["file"].read()
+        try:
+            out = services.unlock_pdf(data, s.validated_data["password"])
+        except pikepdf.PasswordError:
+            return JsonResponse(
+                {"detail": "Wrong password — could not unlock this PDF."}, status=400
+            )
+        except Exception:
+            return JsonResponse({"detail": "Could not unlock this PDF."}, status=422)
+        return _pdf_response(out, "unlocked.pdf")

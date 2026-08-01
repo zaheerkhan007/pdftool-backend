@@ -76,6 +76,28 @@ def pdf_page_count(data: bytes) -> int:
     return len(PdfReader(io.BytesIO(data)).pages)
 
 
+def protect_pdf(data: bytes, password: str) -> bytes:
+    """Encrypt a PDF with a password (AES-256)."""
+    with pikepdf.open(io.BytesIO(data)) as pdf:
+        out = io.BytesIO()
+        pdf.save(
+            out,
+            encryption=pikepdf.Encryption(owner=password, user=password, R=6),
+        )
+        return out.getvalue()
+
+
+def unlock_pdf(data: bytes, password: str) -> bytes:
+    """
+    Remove a known password from a PDF. Raises pikepdf.PasswordError if the
+    password is wrong (the view turns that into a clean 400).
+    """
+    with pikepdf.open(io.BytesIO(data), password=password) as pdf:
+        out = io.BytesIO()
+        pdf.save(out)  # saving without an encryption arg drops the encryption
+        return out.getvalue()
+
+
 def pdf_to_images(data: bytes, dpi: int = 150, fmt: str = "jpeg") -> List[bytes]:
     """
     Render each PDF page to a raster image using PyMuPDF (fitz).

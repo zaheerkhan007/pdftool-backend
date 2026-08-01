@@ -19,4 +19,8 @@ urlpatterns = [
     path("pdf-to-word", views.PdfToWordView.as_view()),
     path("word-to-pdf/", views.WordToPdfView.as_view(), name="word-to-pdf"),
     path("word-to-pdf", views.WordToPdfView.as_view()),
+    path("protect/", views.ProtectView.as_view(), name="protect"),
+    path("protect", views.ProtectView.as_view()),
+    path("unlock/", views.UnlockView.as_view(), name="unlock"),
+    path("unlock", views.UnlockView.as_view()),
 ]
