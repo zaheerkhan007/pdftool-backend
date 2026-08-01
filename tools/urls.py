@@ -43,4 +43,8 @@ urlpatterns = [
     path("pdf-to-pdfa", views.PdfToPdfaView.as_view()),
     path("compare/", views.ComparePdfView.as_view(), name="compare"),
     path("compare", views.ComparePdfView.as_view()),
+    path("summarize/", views.SummarizeView.as_view(), name="summarize"),
+    path("summarize", views.SummarizeView.as_view()),
+    path("translate/", views.TranslateView.as_view(), name="translate"),
+    path("translate", views.TranslateView.as_view()),
 ]

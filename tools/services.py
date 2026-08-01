@@ -323,6 +323,72 @@ def ocr_pdf(data: bytes, lang: str = "eng") -> bytes:
             return fh.read()
 
 
+def _extract_text(data: bytes, max_chars: int = 60000) -> str:
+    """Pull a PDF's text (capped) for the AI tools to work on."""
+    import fitz
+
+    parts, total = [], 0
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for page in doc:
+            t = page.get_text("text")
+            parts.append(t)
+            total += len(t)
+            if total >= max_chars:
+                break
+    return "\n".join(parts).strip()[:max_chars]
+
+
+def _claude(prompt: str, max_tokens: int) -> str:
+    """
+    Call Claude. Requires ANTHROPIC_API_KEY on the server — raises RuntimeError
+    (→ 503) when it's absent so the AI tools degrade gracefully. Model defaults
+    to claude-opus-5; override with ANTHROPIC_MODEL (e.g. claude-haiku-4-5 to
+    cut cost).
+    """
+    import os
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError(
+            "AI features need an Anthropic API key. Set ANTHROPIC_API_KEY on the "
+            "server (and optionally ANTHROPIC_MODEL) and redeploy."
+        )
+    import anthropic
+
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5")
+    client = anthropic.Anthropic()
+    with client.messages.stream(
+        model=model,
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": prompt}],
+    ) as stream:
+        msg = stream.get_final_message()
+    return "".join(b.text for b in msg.content if b.type == "text").strip()
+
+
+def summarize_pdf(data: bytes) -> bytes:
+    text = _extract_text(data)
+    if not text:
+        raise ValueError("No selectable text found — run OCR first, then summarize.")
+    prompt = (
+        "Summarize the following document. Start with a short list of the key "
+        "points as bullets, then a one-paragraph overview. Be clear and concise.\n\n"
+        "---\n\n" + text
+    )
+    return _claude(prompt, max_tokens=4096).encode("utf-8")
+
+
+def translate_pdf(data: bytes, target_language: str) -> bytes:
+    text = _extract_text(data)
+    if not text:
+        raise ValueError("No selectable text found — run OCR first, then translate.")
+    prompt = (
+        f"Translate the following document into {target_language}. Preserve the "
+        "structure and meaning. Output only the translation, with no commentary.\n\n"
+        "---\n\n" + text
+    )
+    return _claude(prompt, max_tokens=16000).encode("utf-8")
+
+
 def compare_pdfs(a: bytes, b: bytes, dpi: int = 120) -> bytes:
     """
     Visually diff two PDFs page by page: render both to images, and output a PDF

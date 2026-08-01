@@ -109,6 +109,10 @@ class OfficeFileSerializer(serializers.Serializer):
         return value
 
 
+class TranslateSerializer(SingleFileSerializer):
+    target_language = serializers.CharField(max_length=60)
+
+
 class ComparePdfSerializer(serializers.Serializer):
     file = serializers.FileField()
     other = serializers.FileField()
