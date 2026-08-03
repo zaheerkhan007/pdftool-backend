@@ -1,28 +1,97 @@
+import re
+import uuid
+
 from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 from .models import ToolUsage
 
 
-class RegisterSerializer(serializers.ModelSerializer):
-    password = serializers.CharField(write_only=True, min_length=8)
+def _username_from_email(email: str) -> str:
+    """
+    Derive a unique username from the email local part. Users never see or type
+    this — it exists only because Django's User model requires it.
+    """
+    local = email.split("@")[0]
+    base = re.sub(r"[^\w.@+-]", "", local)[:20].strip(".") or "user"
+    if not User.objects.filter(username=base).exists():
+        return base
+    # Random suffix rather than a counter: no extra queries, no race between
+    # two signups picking the same next number.
+    for _ in range(5):
+        candidate = f"{base[:24]}-{uuid.uuid4().hex[:6]}"
+        if not User.objects.filter(username=candidate).exists():
+            return candidate
+    return f"user-{uuid.uuid4().hex[:12]}"
 
-    class Meta:
-        model = User
-        fields = ["username", "email", "password"]
+
+class RegisterSerializer(serializers.Serializer):
+    """Email + password signup. Username is generated, never supplied."""
+
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8, max_length=128)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+
+    def validate_email(self, value):
+        email = value.strip().lower()
+        if User.objects.filter(email__iexact=email).exists():
+            raise serializers.ValidationError(
+                "An account with this email already exists."
+            )
+        return email
+
+    def validate_password(self, value):
+        # Django's configured validators (length, common passwords, all-numeric).
+        try:
+            validate_password(value)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+        return value
 
     def create(self, validated_data):
-        return User.objects.create_user(
-            username=validated_data["username"],
-            email=validated_data.get("email", ""),
-            password=validated_data["password"],
-        )
+        email = validated_data["email"]
+        try:
+            with transaction.atomic():
+                return User.objects.create_user(
+                    username=_username_from_email(email),
+                    email=email,
+                    password=validated_data["password"],
+                    first_name=validated_data.get("first_name", ""),
+                )
+        except IntegrityError:
+            # The unique-email index caught a signup that raced past the
+            # validate_email check between two concurrent requests.
+            raise serializers.ValidationError(
+                {"email": ["An account with this email already exists."]}
+            )
+
+
+class EmailTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Swaps SimpleJWT's `username` field for `email`, so the login request body is
+    {"email": ..., "password": ...}. Authentication itself is handled by
+    accounts.backends.EmailBackend.
+    """
+
+    username_field = "email"
+
+    def validate(self, attrs):
+        # Normalise so "  Foo@Bar.com " matches the stored address.
+        if self.username_field in attrs:
+            attrs[self.username_field] = attrs[self.username_field].strip().lower()
+        data = super().validate(attrs)
+        data["user"] = UserSerializer(self.user).data
+        return data
 
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "username", "email", "date_joined"]
+        fields = ["id", "email", "first_name", "date_joined", "is_staff"]
 
 
 class ToolUsageSerializer(serializers.ModelSerializer):

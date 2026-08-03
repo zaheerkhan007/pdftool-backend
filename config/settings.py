@@ -99,6 +99,13 @@ else:
         }
     }
 
+# Email is the login identifier. ModelBackend stays enabled so existing
+# superusers can still reach /admin/ with their username.
+AUTHENTICATION_BACKENDS = [
+    "accounts.backends.EmailBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
+
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -146,6 +153,10 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "40/min",
         "user": "200/min",
+        # Tighter limits on the credential endpoints: the global anon rate is
+        # far too generous for password guessing / signup spam.
+        "login": "10/min",
+        "register": "5/hour",
     },
 }
 
