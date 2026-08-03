@@ -1,8 +1,10 @@
 import io
+import logging
 import os
 import zipfile
 
 import pikepdf
+from accounts.models import ToolUsage
 from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import FileResponse, JsonResponse
 from rest_framework.parsers import FormParser, MultiPartParser
@@ -22,10 +24,16 @@ from .serializers import (
     WordFileSerializer,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _pdf_response(data: bytes, filename: str) -> FileResponse:
     resp = FileResponse(io.BytesIO(data), content_type="application/pdf")
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    # FileResponse can't size a BytesIO on its own. Setting it explicitly gives
+    # the browser a real download progress bar and lets ServerToolView record
+    # the output size for analytics.
+    resp["Content-Length"] = str(len(data))
     return resp
 
 
@@ -49,6 +57,37 @@ def _discard_upload(f) -> None:
             pass
 
 
+def _tool_name(request) -> str:
+    """
+    Endpoint slug for analytics, derived from the path ("/api/tools/merge/" ->
+    "merge"). Taken from the path rather than resolver_match.url_name because
+    the no-trailing-slash route variants are registered without a name.
+    """
+    return request.path.removeprefix("/api/tools/").strip("/")[:50] or "unknown"
+
+
+def _record_usage(request, response) -> None:
+    """
+    Log one row per successful run. Counts and byte totals only — no filenames,
+    no content, nothing that could identify a document. Anonymous runs are
+    recorded with user=None, which is the majority since tools need no account.
+    """
+    if response.status_code >= 400:
+        return
+    try:
+        files = [f for key in request.FILES for f in request.FILES.getlist(key)]
+        ToolUsage.objects.create(
+            user=request.user if request.user.is_authenticated else None,
+            tool=_tool_name(request),
+            file_count=len(files) or 1,
+            input_bytes=sum(getattr(f, "size", 0) or 0 for f in files),
+            output_bytes=int(response.get("Content-Length") or 0),
+        )
+    except Exception:
+        # Analytics must never break a conversion the user is waiting on.
+        logger.warning("Could not record tool usage", exc_info=True)
+
+
 class ServerToolView(APIView):
     """
     Base for every file-processing endpoint. Guarantees uploaded files are NOT
@@ -61,6 +100,9 @@ class ServerToolView(APIView):
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
+        # Order matters: read the upload sizes before _discard_upload closes
+        # the file objects.
+        _record_usage(request, response)
         try:
             for key in request.FILES:
                 for f in request.FILES.getlist(key):
@@ -93,9 +135,11 @@ class SplitView(ServerToolView):
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, part in enumerate(parts, start=1):
                 zf.writestr(f"split_{i}.pdf", part)
+        size = buf.getbuffer().nbytes
         buf.seek(0)
         resp = FileResponse(buf, content_type="application/zip")
         resp["Content-Disposition"] = 'attachment; filename="split.zip"'
+        resp["Content-Length"] = str(size)
         return resp
 
 
@@ -131,9 +175,11 @@ class PdfToJpgView(ServerToolView):
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, img in enumerate(images, start=1):
                 zf.writestr(f"page_{i}.jpg", img)
+        size = buf.getbuffer().nbytes
         buf.seek(0)
         resp = FileResponse(buf, content_type="application/zip")
         resp["Content-Disposition"] = 'attachment; filename="images.zip"'
+        resp["Content-Length"] = str(size)
         resp["X-Page-Count"] = str(len(images))
         return resp
 
@@ -245,6 +291,7 @@ class OfficeToPdfView(ServerToolView):
 def _download(data: bytes, filename: str, content_type: str) -> FileResponse:
     resp = FileResponse(io.BytesIO(data), content_type=content_type)
     resp["Content-Disposition"] = f'attachment; filename="{filename}"'
+    resp["Content-Length"] = str(len(data))
     return resp
 
 
