@@ -389,10 +389,23 @@ def translate_pdf(data: bytes, target_language: str) -> bytes:
     return _claude(prompt, max_tokens=16000).encode("utf-8")
 
 
-def compare_pdfs(a: bytes, b: bytes, dpi: int = 120) -> bytes:
+def compare_pdfs(a: bytes, b: bytes, dpi: int = 120, quality: int = 80) -> bytes:
     """
     Visually diff two PDFs page by page: render both to images, and output a PDF
     where anything that changed is tinted red over the second document.
+
+    Two things here are deliberate and were both bugs before:
+
+    1. Pages are encoded as JPEG, not lossless PNG. These are full-page renders
+       of scanned-looking content, which PNG cannot compress — a 2-page diff
+       came out at 8MB, so a 40-page one landed near 160MB: slow, memory-hungry,
+       and too big for the user to actually send anywhere. JPEG at q80 is
+       visually indistinguishable for this purpose at a fraction of the size.
+
+    2. Page geometry is converted from pixels to POINTS. `new_page` takes
+       points (1/72"), but it was being handed the pixel dimensions of a `dpi`
+       render, so at the default 120dpi every page came out 1.67x oversized and
+       printed at the wrong scale. width_pt = px * 72 / dpi restores 1:1.
     """
     import io
 
@@ -427,10 +440,15 @@ def compare_pdfs(a: bytes, b: bytes, dpi: int = 120) -> bytes:
             result = base_b.copy()
             result.paste(red, (0, 0), mask)
             buf = io.BytesIO()
-            result.save(buf, format="PNG")
-            page = out.new_page(width=w, height=h)
-            page.insert_image(fitz.Rect(0, 0, w, h), stream=buf.getvalue())
-        return out.tobytes()
+            # optimize=True costs a little CPU and buys a few percent more.
+            result.save(buf, format="JPEG", quality=quality, optimize=True)
+            # Pixels -> points, so the output prints at the same size as the input.
+            w_pt = w * 72.0 / dpi
+            h_pt = h * 72.0 / dpi
+            page = out.new_page(width=w_pt, height=h_pt)
+            page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=buf.getvalue())
+        # deflate/garbage collect the output container too.
+        return out.tobytes(deflate=True, garbage=3)
     finally:
         da.close()
         db.close()
