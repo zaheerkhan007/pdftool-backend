@@ -94,6 +94,26 @@ class UserSerializer(serializers.ModelSerializer):
         fields = ["id", "email", "first_name", "date_joined", "is_staff"]
 
 
+class AdminUserSerializer(serializers.ModelSerializer):
+    """
+    Member row for the staff dashboard. `runs` comes from an annotate() on the
+    queryset, so listing 200 users costs one query rather than 200.
+
+    Staff-only by virtue of where it is used — AdminStatsView is IsAdminUser.
+    Deliberately no password, no tokens and no last-IP: this answers "who signed
+    up and are they using it", not "what is this person doing".
+    """
+
+    runs = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = User
+        fields = [
+            "id", "email", "first_name", "date_joined",
+            "last_login", "is_staff", "is_active", "runs",
+        ]
+
+
 class ToolUsageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ToolUsage
