@@ -113,6 +113,25 @@ class TranslateSerializer(SingleFileSerializer):
     target_language = serializers.CharField(max_length=60)
 
 
+class TrackSerializer(serializers.Serializer):
+    """
+    A browser-side tool reporting that it produced a result.
+
+    Deliberately minimal: a slug, a count and a byte total. There is no field
+    here for a filename or anything derived from the document, so this endpoint
+    cannot be used to record what someone processed even by accident.
+    """
+
+    # Matches the slug format used by /tools/<slug>; the regex is the whole
+    # validation, since the backend has no copy of the frontend's catalog.
+    tool = serializers.RegexField(r"^[a-z0-9][a-z0-9-]{0,49}$")
+    files = serializers.IntegerField(min_value=1, max_value=1000, default=1)
+    # Capped rather than unbounded so a bad or malicious client cannot skew the
+    # dashboard's byte totals into meaninglessness. 2GB is far above any real
+    # browser-side output.
+    bytes = serializers.IntegerField(min_value=0, max_value=2_147_483_648, default=0)
+
+
 class ComparePdfSerializer(serializers.Serializer):
     file = serializers.FileField()
     other = serializers.FileField()

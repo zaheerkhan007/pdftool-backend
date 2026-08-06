@@ -7,7 +7,8 @@ import pikepdf
 from accounts.models import ToolUsage
 from django.core.files.uploadedfile import TemporaryUploadedFile
 from django.http import FileResponse, JsonResponse
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import services
@@ -20,6 +21,7 @@ from .serializers import (
     RotateSerializer,
     SingleFileSerializer,
     SplitSerializer,
+    TrackSerializer,
     TranslateSerializer,
     WordFileSerializer,
 )
@@ -384,6 +386,43 @@ class ComparePdfView(ServerToolView):
                 {"detail": "Could not compare these PDFs."}, status=422
             )
         return _pdf_response(out, "comparison.pdf")
+
+
+class TrackView(APIView):
+    """
+    Records a run of a BROWSER-side tool.
+
+    The 48 client-side tools never upload anything, so ServerToolView never sees
+    them and the dashboard only ever reflected the 18 server tools. This gives
+    those tools a way to say "I ran" without sending the file.
+
+    Note it does NOT subclass ServerToolView: there is no upload to discard, and
+    finalize_response would try to record a second row.
+
+    Trust model: this is an unauthenticated write, so the numbers are
+    best-effort analytics, not an audit trail — someone determined could inflate
+    a counter. DRF's configured anon/user throttles apply, the serializer caps
+    every field, and nothing here feeds billing or access control, so that
+    trade-off is acceptable for what it is.
+    """
+
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        s = TrackSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        try:
+            ToolUsage.objects.create(
+                user=request.user if request.user.is_authenticated else None,
+                tool=s.validated_data["tool"],
+                file_count=s.validated_data["files"],
+                input_bytes=0,  # nothing was uploaded — that is the whole point
+                output_bytes=s.validated_data["bytes"],
+            )
+        except Exception:
+            logger.warning("Could not record browser tool usage", exc_info=True)
+        # 204: the client is fire-and-forget via sendBeacon and reads no body.
+        return Response(status=204)
 
 
 class SummarizeView(ServerToolView):

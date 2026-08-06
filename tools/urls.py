@@ -47,4 +47,8 @@ urlpatterns = [
     path("summarize", views.SummarizeView.as_view()),
     path("translate/", views.TranslateView.as_view(), name="translate"),
     path("translate", views.TranslateView.as_view()),
+    # Browser-side tools reporting a run. Registered both ways like everything
+    # else here, since APPEND_SLASH is off and sendBeacon will not follow a 308.
+    path("track/", views.TrackView.as_view(), name="track"),
+    path("track", views.TrackView.as_view()),
 ]
