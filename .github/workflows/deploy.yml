@@ -74,7 +74,7 @@ jobs:
       - name: Smoke test
         run: |
           for i in $(seq 1 12); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://api-pdf.taskoverflow.app/api/tools/health/ || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://api.quickietool.com/api/tools/health/ || true)
             [ "$code" = "200" ] && { echo "health ok"; exit 0; }
             echo "attempt $i: got $code, retrying"; sleep 10
           done
