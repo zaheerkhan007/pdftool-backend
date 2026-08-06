@@ -39,6 +39,8 @@ def _pdf_response(data: bytes, filename: str) -> FileResponse:
 
 def _discard_upload(f) -> None:
     """Immediately remove an uploaded file from disk (if it was spooled there)."""
+    # Small uploads live in memory (nothing on disk); large ones are spooled to a
+    # temp file by Django. Close + unlink so nothing lingers after processing.
     try:
         path = f.temporary_file_path() if isinstance(f, TemporaryUploadedFile) else None
     except Exception:
