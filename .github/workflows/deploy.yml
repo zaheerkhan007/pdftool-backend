@@ -72,9 +72,16 @@ jobs:
             "GHCR_USER='${{ github.actor }}' /opt/pdftool/deploy.sh backend '${IMAGE_REF}'"
 
       - name: Smoke test
+        # The public API hostname. Override without editing this file by setting
+        # a repo variable BACKEND_HEALTH_URL.
+        # Note the browser never calls this host directly — Next proxies /api/*
+        # over the internal Docker network — so it is only used for this check
+        # and for direct/admin access.
+        env:
+          HEALTH_URL: ${{ vars.BACKEND_HEALTH_URL || 'https://api.quickietool.com/api/tools/health/' }}
         run: |
           for i in $(seq 1 12); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://api-pdf.taskoverflow.app/api/tools/health/ || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" || true)
             [ "$code" = "200" ] && { echo "health ok"; exit 0; }
             echo "attempt $i: got $code, retrying"; sleep 10
           done
