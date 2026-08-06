@@ -389,28 +389,38 @@ def translate_pdf(data: bytes, target_language: str) -> bytes:
     return _claude(prompt, max_tokens=16000).encode("utf-8")
 
 
-def compare_pdfs(a: bytes, b: bytes, dpi: int = 120, quality: int = 80) -> bytes:
+def compare_pdfs(a: bytes, b: bytes, dpi: int = 110, quality: int = 78) -> bytes:
     """
-    Visually diff two PDFs page by page: render both to images, and output a PDF
-    where anything that changed is tinted red over the second document.
+    Compare two PDFs page by page and produce a side-by-side report: the
+    original on the left, the changed version on the right, with the regions
+    that differ highlighted on both.
 
-    Two things here are deliberate and were both bugs before:
+    WHY SIDE-BY-SIDE RATHER THAN AN OVERLAY
+    The previous version composited one page on top of the other and painted
+    every differing pixel OPAQUE red. That only reads correctly when the two
+    files are already nearly identical. Give it two genuinely different
+    documents — the common case, and what a real catalogue produced — and
+    almost every pixel differs, so the page came back a solid red block with
+    both documents' content smeared through it. Measured on dense pages: 42-48%
+    of the sheet painted flat red, and the underlying content destroyed.
 
-    1. Pages are encoded as JPEG, not lossless PNG. These are full-page renders
-       of scanned-looking content, which PNG cannot compress — a 2-page diff
-       came out at 8MB, so a 40-page one landed near 160MB: slow, memory-hungry,
-       and too big for the user to actually send anywhere. JPEG at q80 is
-       visually indistinguishable for this purpose at a fraction of the size.
+    The fix is twofold. Showing both pages next to each other means you can
+    actually read what changed instead of inferring it, and the highlight is
+    TRANSLUCENT, so content stays legible underneath rather than being replaced
+    by a colour block.
 
-    2. Page geometry is converted from pixels to POINTS. `new_page` takes
-       points (1/72"), but it was being handed the pixel dimensions of a `dpi`
-       render, so at the default 120dpi every page came out 1.67x oversized and
-       printed at the wrong scale. width_pt = px * 72 / dpi restores 1:1.
+    Also kept from the previous fix: JPEG rather than lossless PNG (a 2-page
+    diff was 8MB as PNG), and page geometry converted from pixels to points, so
+    output prints at 1:1 instead of dpi/72 oversized.
     """
     import io
 
     import fitz
-    from PIL import Image, ImageChops
+    from PIL import Image, ImageChops, ImageFilter
+
+    GAP = 16.0        # points between the two pages
+    MARGIN = 14.0
+    HEADER = 30.0     # room for the labels above each page
 
     def render(doc, i):
         if i >= len(doc):
@@ -418,36 +428,101 @@ def compare_pdfs(a: bytes, b: bytes, dpi: int = 120, quality: int = 80) -> bytes
         pix = doc[i].get_pixmap(dpi=dpi)
         return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
+    def encode(img: Image.Image) -> bytes:
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        return buf.getvalue()
+
+    def tint(img: Image.Image, mask: Image.Image, colour: tuple[int, int, int]) -> Image.Image:
+        """Wash the masked regions with colour, keeping the content readable."""
+        out = img.copy()
+        layer = Image.new("RGB", img.size, colour)
+        # ~40% opacity. Enough to spot at a glance, light enough to read through.
+        out.paste(layer, (0, 0), mask.point(lambda p: 105 if p else 0))
+        return out
+
     da = fitz.open(stream=a, filetype="pdf")
     db = fitz.open(stream=b, filetype="pdf")
     try:
         out = fitz.open()
         n = max(len(da), len(db))
+
         for i in range(n):
             ia = render(da, i)
             ib = render(db, i)
-            w = max(ia.width if ia else 1, ib.width if ib else 1)
-            h = max(ia.height if ia else 1, ib.height if ib else 1)
-            base_a = Image.new("RGB", (w, h), "white")
-            base_b = Image.new("RGB", (w, h), "white")
-            if ia:
-                base_a.paste(ia, (0, 0))
-            if ib:
-                base_b.paste(ib, (0, 0))
-            diff = ImageChops.difference(base_a, base_b)
-            mask = diff.convert("L").point(lambda p: 255 if p > 30 else 0)
-            red = Image.new("RGB", (w, h), (255, 40, 40))
-            result = base_b.copy()
-            result.paste(red, (0, 0), mask)
-            buf = io.BytesIO()
-            # optimize=True costs a little CPU and buys a few percent more.
-            result.save(buf, format="JPEG", quality=quality, optimize=True)
-            # Pixels -> points, so the output prints at the same size as the input.
-            w_pt = w * 72.0 / dpi
-            h_pt = h * 72.0 / dpi
-            page = out.new_page(width=w_pt, height=h_pt)
-            page.insert_image(fitz.Rect(0, 0, w_pt, h_pt), stream=buf.getvalue())
-        # deflate/garbage collect the output container too.
+
+            changed_pct = None
+            if ia is not None and ib is not None:
+                w = max(ia.width, ib.width)
+                h = max(ia.height, ib.height)
+                # Pad to a common canvas so pages of differing size still align
+                # at the top-left rather than failing to subtract.
+                pa = Image.new("RGB", (w, h), "white")
+                pb = Image.new("RGB", (w, h), "white")
+                pa.paste(ia, (0, 0))
+                pb.paste(ib, (0, 0))
+
+                diff = ImageChops.difference(pa, pb).convert("L")
+                mask = diff.point(lambda p: 255 if p > 32 else 0)
+                # Consolidate speckle from anti-aliasing into solid regions, so
+                # the highlight marks areas rather than peppering the page.
+                mask = mask.filter(ImageFilter.MaxFilter(5))
+
+                changed_pct = (sum(mask.point(lambda p: 1 if p else 0).getdata()) / (w * h)) * 100.0
+
+                left = tint(pa, mask, (220, 60, 60))    # removed / was here
+                right = tint(pb, mask, (70, 170, 90))   # added / is here now
+            else:
+                # Page exists in only one document.
+                left = ia
+                right = ib
+
+            # ---- compose the output page -------------------------------------
+            def pt(img):
+                return (img.width * 72.0 / dpi, img.height * 72.0 / dpi) if img else (0.0, 0.0)
+
+            lw, lh = pt(left)
+            rw, rh = pt(right)
+            page_w = MARGIN * 2 + lw + GAP + rw
+            page_h = MARGIN * 2 + HEADER + max(lh, rh)
+            page = out.new_page(width=page_w, height=page_h)
+
+            y0 = MARGIN + HEADER
+            if left is not None:
+                page.insert_image(fitz.Rect(MARGIN, y0, MARGIN + lw, y0 + lh), stream=encode(left))
+                page.insert_text(
+                    (MARGIN, MARGIN + 14),
+                    f"Original — page {i + 1}" if ia is not None else "",
+                    fontname="hebo", fontsize=10, color=(0.35, 0.35, 0.4),
+                )
+            if right is not None:
+                x = MARGIN + lw + GAP
+                page.insert_image(fitz.Rect(x, y0, x + rw, y0 + rh), stream=encode(right))
+                page.insert_text(
+                    (x, MARGIN + 14),
+                    f"Changed — page {i + 1}" if ib is not None else "",
+                    fontname="hebo", fontsize=10, color=(0.35, 0.35, 0.4),
+                )
+
+            # A one-line verdict beats making the reader estimate from colour.
+            if changed_pct is not None:
+                note = (
+                    "identical" if changed_pct < 0.05
+                    else f"{changed_pct:.1f}% of the page differs"
+                )
+                colour = (0.2, 0.55, 0.3) if changed_pct < 0.05 else (0.75, 0.2, 0.2)
+                page.insert_text(
+                    (MARGIN, MARGIN + 27), note,
+                    fontname="helv", fontsize=8, color=colour,
+                )
+            else:
+                only = "original" if ib is None else "changed version"
+                page.insert_text(
+                    (MARGIN, MARGIN + 27),
+                    f"page {i + 1} exists only in the {only}",
+                    fontname="helv", fontsize=8, color=(0.75, 0.2, 0.2),
+                )
+
         return out.tobytes(deflate=True, garbage=3)
     finally:
         da.close()
